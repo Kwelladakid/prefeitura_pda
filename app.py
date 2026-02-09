@@ -140,7 +140,8 @@ if uploaded_file:
     # DataFrame para exibição segura (evita ArrowTypeError)
     df_display = df_calculo.copy()
     for col in df_display.columns:
-        if (not pd.api.types.is_numeric_dtype(df_display[col])) and (not pd.api.types.is_datetime64_any_dtype[df_display[col]]):
+        # CORREÇÃO: use parênteses para chamar a função is_datetime64_any_dtype(...)
+        if not (pd.api.types.is_numeric_dtype(df_display[col]) or pd.api.types.is_datetime64_any_dtype(df_display[col])):
             df_display[col] = df_display[col].astype(str).replace("nan", "")
 
     # Bytes para planilhas (Excel/CSV)
@@ -358,7 +359,7 @@ if uploaded_file:
             figuras_png = []
             try:
                 for f in export_figs:
-                    png = pio.to_image(f, format="png", width=1200, height=700)  # requer backend de imagem
+                    png = pio.to_image(f, format="png", width=1200, height=700)  # se não houver backend, cai no except
                     figuras_png.append(png)
             except Exception as e:
                 st.warning(f"Não foi possível incluir gráficos no PDF neste ambiente: {e}")
