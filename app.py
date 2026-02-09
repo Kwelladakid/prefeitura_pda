@@ -11,7 +11,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 import google.generativeai as genai
-import streamlit.components.v1 as components
 
 
 # =========================
@@ -77,9 +76,6 @@ def build_full_html_page(
     return html.encode("utf-8")
 
 
-# =========================
-# Auxiliar: HTML do dashboard simples (se quiser baixar só os gráficos)
-# =========================
 def build_dashboard_html(figs, title="Dashboard de Despesas"):
     parts = []
     for i, f in enumerate(figs):
@@ -93,7 +89,7 @@ def build_dashboard_html(figs, title="Dashboard de Despesas"):
 # Configuração da página
 # =========================
 st.set_page_config(page_title="Analista de Despesas - Prefeitura", layout="wide")
-st.title("🏛️ Analista de Despesas (HTML Integrado dentro do App)")
+st.title("🏛️ Analista de Despesas (Download do HTML Integrado)")
 st.markdown("---")
 
 # =========================
@@ -103,13 +99,7 @@ st.sidebar.header("⚙️ Configurações")
 gemini_key = st.sidebar.text_input("Gemini API Key", type="password", value=os.getenv("GEMINI_API_KEY", ""))
 st.sidebar.caption("Dica: exporte GEMINI_API_KEY no seu ~/.zshrc para preencher automaticamente.")
 
-# =========================
-# Upload de arquivo
-# =========================
-st.subheader("📂 Carregar Planilha")
-uploaded_file = st.file_uploader("Arraste seu arquivo CSV/XLSX/XLS aqui", type=["csv", "xlsx", "xls"])
-
-# Sessão: IA e HTML integrado
+# Estado para IA e gráficos
 if "ia_text" not in st.session_state:
     st.session_state["ia_text"] = ""
 if "export_figs" not in st.session_state:
@@ -119,8 +109,14 @@ if "dashboard_ready" not in st.session_state:
 if "full_html_bytes" not in st.session_state:
     st.session_state["full_html_bytes"] = None
 
+# =========================
+# Upload de arquivo
+# =========================
+st.subheader("📂 Carregar Planilha")
+uploaded_file = st.file_uploader("Arraste seu arquivo CSV/XLSX/XLS aqui", type=["csv", "xlsx", "xls"])
+
 if uploaded_file:
-    # Leitura do arquivo (motores explícitos)
+    # Leitura do arquivo
     try:
         name = uploaded_file.name.lower()
         if name.endswith(".csv"):
@@ -157,10 +153,8 @@ if uploaded_file:
     # DataFrame para cálculos/gráficos (mantém numéricos)
     df_calculo = df_clean.copy()
     for col in df_calculo.columns:
-        # Heurística de colunas numéricas
         if any(k in col for k in ["valor", "pago", "total", "quantidade", "preco", "custo", "despesa"]):
             df_calculo[col] = pd.to_numeric(df_calculo[col], errors="coerce").fillna(0)
-        # Datas
         if any(k in col for k in ["data", "vencimento", "emissao"]):
             df_calculo[col] = pd.to_datetime(df_calculo[col], errors="coerce")
 
@@ -170,7 +164,7 @@ if uploaded_file:
         if not (pd.api.types.is_numeric_dtype(df_display[col]) or pd.api.types.is_datetime64_any_dtype(df_display[col])):
             df_display[col] = df_display[col].astype(str).replace("nan", "")
 
-    # Bytes das planilhas (opcional pra download)
+    # Geração de bytes para Excel/CSV
     excel_buf = io.BytesIO()
     with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
         df_clean.to_excel(writer, index=False, sheet_name="dados_limpos")
@@ -178,10 +172,10 @@ if uploaded_file:
     csv_bytes = df_clean.to_csv(index=False).encode("utf-8-sig")
 
     # =========================
-    # Interface em abas
+    # Abas principais
     # =========================
-    tab_dash, tab_dados, tab_ia, tab_html = st.tabs(
-        ["📊 Dashboard", "📋 Dados Limpos", "🤖 IA (Gemini)", "🌐 Página Completa (Visualizar e Baixar)"]
+    tab_dash, tab_dados, tab_ia, tab_down = st.tabs(
+        ["📊 Dashboard", "📋 Dados Limpos", "🤖 IA (Gemini)", "⬇️ Downloads"]
     )
 
     # -------- Dashboard --------
@@ -220,7 +214,6 @@ if uploaded_file:
                 st.plotly_chart(fig_pie, use_container_width=True)
                 export_figs.append(fig_pie)
 
-            # Linha do tempo (se houver data)
             if cols_date:
                 st.markdown("---")
                 st.markdown("**Evolução dos Gastos no Tempo**")
@@ -235,7 +228,6 @@ if uploaded_file:
                     st.plotly_chart(fig_line, use_container_width=True)
                     export_figs.append(fig_line)
 
-            # Radar (opcional)
             st.markdown("---")
             with st.expander("Gráfico Radar (opcional)"):
                 if len(cols_num) >= 1 and cols_txt:
@@ -251,7 +243,6 @@ if uploaded_file:
                             .head(top_n)
                             .reset_index()
                         )
-                        # Normaliza por coluna para comparar escalas diferentes
                         base_norm = base.copy()
                         for c in val_cols:
                             maxv = base_norm[c].max() or 1
@@ -280,7 +271,7 @@ if uploaded_file:
         else:
             st.warning("Não foi possível identificar colunas numéricas e categóricas para o dashboard.")
 
-        # Guardar no estado para HTML único
+        # Guarda gráficos no estado
         st.session_state["export_figs"] = export_figs
         st.session_state["dashboard_ready"] = bool(export_figs)
 
@@ -332,7 +323,7 @@ if uploaded_file:
                                 resp = model.generate_content(prompt)
                                 text = getattr(resp, "text", "").strip()
                                 st.session_state["ia_text"] = text or "Sem resposta da IA."
-                                st.success("Relatório da IA gerado e salvo para a Página Completa.")
+                                st.success("Relatório da IA gerado e salvo para o HTML integrado.")
                     except Exception as e:
                         st.error(f"Erro com a IA: {e}")
                         st.info("Verifique sua chave e permissões no Google AI Studio.")
@@ -343,65 +334,79 @@ if uploaded_file:
                 st.info("Relatório da IA limpo.")
 
         if st.session_state.get("ia_text"):
-            st.markdown("### Pré-visualização do relatório da IA")
+            st.markdown("### Prévia do relatório da IA (texto)")
             st.write(st.session_state["ia_text"])
 
-    # -------- Página Completa (Visualizar e Baixar) --------
-    with tab_html:
-        st.subheader("Página Completa (HTML integrado dentro do app)")
+    # -------- Downloads --------
+    with tab_down:
+        st.subheader("Exportações e Geração do HTML Integrado")
 
-        # Opção para limitar linhas da tabela no HTML (para páginas menores)
-        limit_rows = st.slider("Linhas da tabela na Página Completa (0 = todas)", 0, 1000, 200, step=50)
-        if limit_rows > 0:
-            df_for_table = df_display.head(limit_rows)
-        else:
-            df_for_table = df_display
-
-        # Constrói tabela HTML
-        table_html = df_for_table.to_html(index=False, escape=False)
-
-        # Gera/Atualiza Página Completa
-        if st.button("Gerar Página Completa (HTML)"):
-            full_html_bytes = build_full_html_page(
-                title="Portal de Despesas - Página Completa",
-                df_html_table=table_html,
-                figs=st.session_state.get("export_figs", []),
-                ia_text=st.session_state.get("ia_text", "")
-            )
-            st.session_state["full_html_bytes"] = full_html_bytes
-            st.success("Página Completa gerada. Veja a pré-visualização abaixo.")
-
-        # Pré-visualização dentro do app
-        if st.session_state.get("full_html_bytes"):
-            st.markdown("### Visualização ao vivo")
-            components.html(
-                st.session_state["full_html_bytes"].decode("utf-8"),
-                height=900,
-                scrolling=True
-            )
-
-            # Download (opcional)
+        colA, colB = st.columns(2)
+        with colA:
             st.download_button(
-                "⬇️ Baixar Página Completa (index.html)",
-                data=st.session_state["full_html_bytes"],
-                file_name="index.html",
+                "📥 Excel (dados limpos)",
+                data=excel_bytes,
+                file_name="despesas_processadas.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        with colB:
+            st.download_button(
+                "📥 CSV (dados limpos)",
+                data=csv_bytes,
+                file_name="despesas_processadas.csv",
+                mime="text/csv",
+            )
+
+        st.markdown("---")
+        # HTML do dashboard (opcional)
+        export_figs = st.session_state.get("export_figs", [])
+        dashboard_ready = st.session_state.get("dashboard_ready", False)
+        html_dash_bytes = None
+        if dashboard_ready and export_figs:
+            html_dash_bytes = build_dashboard_html(export_figs, title="Dashboard de Despesas")
+            st.download_button(
+                "⬇️ Dashboard (HTML apenas gráficos)",
+                data=html_dash_bytes,
+                file_name="dashboard_despesas.html",
                 mime="text/html",
             )
-
-            # ZIP com planilhas + index.html (opcional)
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("index.html", st.session_state["full_html_bytes"])
-                zf.writestr("despesas_processadas.xlsx", excel_bytes)
-                zf.writestr("despesas_processadas.csv", csv_bytes)
-            zip_buf.seek(0)
-            st.download_button(
-                "📦 Baixar Tudo (ZIP: index.html + planilhas)",
-                data=zip_buf.getvalue(),
-                file_name="pacote_publicacao.zip",
-                mime="application/zip",
-            )
         else:
-            st.info("Clique em 'Gerar Página Completa (HTML)' para montar e visualizar aqui dentro do app.")
+            st.caption("Gere o dashboard na aba '📊 Dashboard' para baixar o HTML dos gráficos (opcional).")
+
+        st.markdown("---")
+        # HTML completo (index.html)
+        limit_rows = st.slider("Linhas da tabela no HTML Integrado (0 = todas)", 0, 1000, 200, step=50)
+        df_for_table = df_display.head(limit_rows) if limit_rows > 0 else df_display
+        table_html = df_for_table.to_html(index=False, escape=False)
+        ia_text = st.session_state.get("ia_text", "")
+
+        # Gera o HTML integrado agora (sem pré-visualização)
+        full_html_bytes = build_full_html_page(
+            title="Portal de Despesas - Página Completa",
+            df_html_table=table_html,
+            figs=export_figs,
+            ia_text=ia_text
+        )
+
+        st.download_button(
+            "🧾 Baixar Página Completa (index.html)",
+            data=full_html_bytes,
+            file_name="index.html",
+            mime="text/html",
+        )
+
+        # ZIP com index.html + planilhas
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("index.html", full_html_bytes)
+            zf.writestr("despesas_processadas.xlsx", excel_bytes)
+            zf.writestr("despesas_processadas.csv", csv_bytes)
+        zip_buf.seek(0)
+        st.download_button(
+            "📦 Baixar Tudo (ZIP: index.html + planilhas)",
+            data=zip_buf.getvalue(),
+            file_name="pacote_publicacao.zip",
+            mime="application/zip",
+        )
 else:
     st.info("💡 Faça upload de um arquivo para iniciar.")
