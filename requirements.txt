@@ -6,3 +6,5 @@ google-generativeai
 xlsxwriter
 reportlab
 google-cloud-storage
+openpyxl>=3.1.2
+xlrd>=2.0.1
