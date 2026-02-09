@@ -2,7 +2,6 @@
 
 import os
 import io
-import json
 import zipfile
 from datetime import datetime
 
@@ -13,13 +12,19 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import google.generativeai as genai
 
+# NOVO: Matplotlib/Seaborn para gerar imagens estáticas p/ PDF (sem Chrome/Kaleido)
+import matplotlib
+matplotlib.use("Agg")  # backend sem UI, compatível com cloud
+import matplotlib.pyplot as plt
+import seaborn as sns
+
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 
 
 # =========================
-# Funções utilitárias (Downloads)
+# Utilitários HTML/PDF
 # =========================
 def build_dashboard_html(figs, title="Dashboard de Despesas"):
     parts = []
@@ -47,7 +52,8 @@ def build_pdf_report(titulo, resumo_texto, figuras_png_bytes, author="Analista I
     text_obj = c.beginText(40, height - 100)
     text_obj.setFont("Helvetica", 11)
     for line in resumo_texto.splitlines():
-        text_obj.textLine(line[:115])
+        for chunk in [line[i:i+110] for i in range(0, len(line), 110)]:
+            text_obj.textLine(chunk)
     c.drawText(text_obj)
 
     # Figuras (2 por página, se necessário)
@@ -72,7 +78,74 @@ def build_pdf_report(titulo, resumo_texto, figuras_png_bytes, author="Analista I
 
 
 # =========================
-# Configuração da página
+# NOVO: Gráficos estáticos com Matplotlib para PDF
+# =========================
+def fig_to_png_bytes(plt_fig, tight=True, dpi=150):
+    img_buf = io.BytesIO()
+    if tight:
+        plt_fig.tight_layout()
+    plt_fig.savefig(img_buf, format="png", dpi=dpi)
+    plt.close(plt_fig)
+    img_buf.seek(0)
+    return img_buf.getvalue()
+
+
+def make_bar_png(df_grouped, cat_col, val_col, title):
+    plt_fig, ax = plt.subplots(figsize=(10, 5))
+    sns.barplot(data=df_grouped, x=cat_col, y=val_col, ax=ax, palette="Blues_d")
+    ax.set_title(title)
+    ax.set_xlabel(cat_col)
+    ax.set_ylabel(val_col)
+    ax.tick_params(axis='x', rotation=45, ha='right')
+    return fig_to_png_bytes(plt_fig)
+
+
+def make_pie_png(df_grouped, cat_col, val_col, title):
+    plt_fig, ax = plt.subplots(figsize=(7, 7))
+    ax.pie(df_grouped[val_col], labels=df_grouped[cat_col], autopct='%1.1f%%', startangle=140)
+    ax.set_title(title)
+    return fig_to_png_bytes(plt_fig)
+
+
+def make_line_png(df_time, date_col, val_col, title):
+    plt_fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(df_time[date_col], df_time[val_col], marker='o', linewidth=2, color="#155DE9")
+    ax.set_title(title)
+    ax.set_xlabel("Data")
+    ax.set_ylabel(val_col)
+    plt.xticks(rotation=30, ha='right')
+    plt.grid(alpha=0.3)
+    return fig_to_png_bytes(plt_fig)
+
+
+def make_radar_png(base_norm, dim_col, metrics, title):
+    # Radar simples com Matplotlib (valores normalizados 0-1)
+    labels = metrics
+    num_labels = len(labels)
+    angles = [n / float(num_labels) * 2 * 3.14159265 for n in range(num_labels)]
+    angles += angles[:1]  # fecha o círculo
+
+    plt_fig = plt.figure(figsize=(8, 6))
+    ax = plt.subplot(111, polar=True)
+    ax.set_theta_offset(3.14159265 / 2)
+    ax.set_theta_direction(-1)
+
+    plt.xticks(angles[:-1], labels)
+    ax.set_rlabel_position(0)
+    ax.set_title(title, y=1.1)
+
+    for _, row in base_norm.iterrows():
+        values = [row[m] for m in metrics]
+        values += values[:1]
+        ax.plot(angles, values, linewidth=1, linestyle='solid', label=str(row[dim_col]))
+        ax.fill(angles, values, alpha=0.1)
+
+    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1))
+    return fig_to_png_bytes(plt_fig)
+
+
+# =========================
+# Config da página
 # =========================
 st.set_page_config(page_title="Analista de Despesas - Prefeitura", layout="wide")
 st.title("🏛️ Analista de Despesas (Limpeza, Dashboard, IA)")
@@ -86,13 +159,13 @@ gemini_key = st.sidebar.text_input("Gemini API Key", type="password", value=os.g
 st.sidebar.caption("Dica: exporte GEMINI_API_KEY no seu ~/.zshrc para preencher automaticamente.")
 
 # =========================
-# Upload de arquivo
+# Upload
 # =========================
 st.subheader("📂 Carregar Planilha")
 uploaded_file = st.file_uploader("Arraste seu arquivo CSV/XLSX/XLS aqui", type=["csv", "xlsx", "xls"])
 
 if uploaded_file:
-    # Leitura do arquivo (motores explícitos)
+    # Leitura
     try:
         name = uploaded_file.name.lower()
         if name.endswith(".csv"):
@@ -107,53 +180,35 @@ if uploaded_file:
         st.error(f"Erro ao ler o arquivo: {e}")
         st.stop()
 
-    # =========================
     # Limpeza e tipagem
-    # =========================
     df_clean = df_raw.copy()
-
-    # Padroniza nomes de colunas
     df_clean.columns = (
         df_clean.columns.astype(str)
-        .str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-        .str.normalize("NFKD")
-        .str.encode("ascii", errors="ignore")
-        .str.decode("utf-8")
+        .str.strip().str.lower().str.replace(" ", "_")
+        .str.normalize("NFKD").str.encode("ascii", errors="ignore").str.decode("utf-8")
     )
-
-    # Remove linhas/colunas totalmente vazias e duplicatas
     df_clean = df_clean.dropna(how="all").dropna(axis=1, how="all").drop_duplicates()
 
-    # DataFrame para cálculos/gráficos (mantém numéricos)
     df_calculo = df_clean.copy()
     for col in df_calculo.columns:
-        # Heurística de colunas numéricas
         if any(k in col for k in ["valor", "pago", "total", "quantidade", "preco", "custo", "despesa"]):
             df_calculo[col] = pd.to_numeric(df_calculo[col], errors="coerce").fillna(0)
-
-        # Datas
         if any(k in col for k in ["data", "vencimento", "emissao"]):
             df_calculo[col] = pd.to_datetime(df_calculo[col], errors="coerce")
 
-    # DataFrame para exibição segura (evita ArrowTypeError)
     df_display = df_calculo.copy()
     for col in df_display.columns:
-        # CORREÇÃO: use parênteses para chamar a função is_datetime64_any_dtype(...)
         if not (pd.api.types.is_numeric_dtype(df_display[col]) or pd.api.types.is_datetime64_any_dtype(df_display[col])):
             df_display[col] = df_display[col].astype(str).replace("nan", "")
 
-    # Bytes para planilhas (Excel/CSV)
+    # Arquivos base
     excel_buf = io.BytesIO()
     with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
         df_clean.to_excel(writer, index=False, sheet_name="dados_limpos")
     excel_bytes = excel_buf.getvalue()
     csv_bytes = df_clean.to_csv(index=False).encode("utf-8-sig")
 
-    # =========================
-    # Interface em abas
-    # =========================
+    # Abas
     tab_dash, tab_dados, tab_ia, tab_down = st.tabs(
         ["📊 Dashboard", "📋 Dados Limpos", "🤖 IA (Gemini)", "⬇️ Downloads"]
     )
@@ -165,6 +220,7 @@ if uploaded_file:
         cols_date = df_calculo.select_dtypes(include=["datetime64[ns]", "datetime64[ns, UTC]"]).columns.tolist()
         cols_txt = [c for c in df_calculo.columns if c not in cols_num and c not in cols_date]
         export_figs = []
+        pdf_ctx = {}  # NOVO: contexto para gerar PNGs com Matplotlib
 
         if cols_num and cols_txt:
             c1, c2 = st.columns(2)
@@ -174,27 +230,23 @@ if uploaded_file:
 
                 df_grouped = (
                     df_calculo.groupby(eixo_x)[eixo_y]
-                    .sum()
-                    .reset_index()
-                    .sort_values(eixo_y, ascending=False)
-                    .head(15)
+                    .sum().reset_index().sort_values(eixo_y, ascending=False).head(15)
                 )
-                fig_bar = px.bar(
-                    df_grouped, x=eixo_x, y=eixo_y, color=eixo_x,
-                    title=f"Top 15 por {eixo_x}", template="plotly_white"
-                )
+                fig_bar = px.bar(df_grouped, x=eixo_x, y=eixo_y, color=eixo_x,
+                                 title=f"Top 15 por {eixo_x}", template="plotly_white")
                 st.plotly_chart(fig_bar, use_container_width=True)
                 export_figs.append(fig_bar)
+                # Para PDF
+                pdf_ctx["bar"] = (df_grouped, eixo_x, eixo_y, f"Top 15 por {eixo_x}")
 
             with c2:
-                fig_pie = px.pie(
-                    df_grouped, names=eixo_x, values=eixo_y,
-                    title=f"Distribuição de {eixo_y}", hole=0.4
-                )
+                fig_pie = px.pie(df_grouped, names=eixo_x, values=eixo_y,
+                                 title=f"Distribuição de {eixo_y}", hole=0.4)
                 st.plotly_chart(fig_pie, use_container_width=True)
                 export_figs.append(fig_pie)
+                # Para PDF
+                pdf_ctx["pie"] = (df_grouped, eixo_x, eixo_y, f"Distribuição de {eixo_y}")
 
-            # Linha do tempo (se houver data)
             if cols_date:
                 st.markdown("---")
                 st.markdown("**Evolução dos Gastos no Tempo**")
@@ -202,30 +254,28 @@ if uploaded_file:
                 df_time = df_calculo.dropna(subset=[data_col]).copy()
                 if not df_time.empty:
                     df_time = df_time.groupby(data_col)[eixo_y].sum().reset_index().sort_values(data_col)
-                    fig_line = px.line(
-                        df_time, x=data_col, y=eixo_y,
-                        title="Linha do Tempo de Despesas", template="plotly_white"
-                    )
+                    fig_line = px.line(df_time, x=data_col, y=eixo_y,
+                                       title="Linha do Tempo de Despesas", template="plotly_white")
                     st.plotly_chart(fig_line, use_container_width=True)
                     export_figs.append(fig_line)
+                    # Para PDF
+                    pdf_ctx["line"] = (df_time, data_col, eixo_y, "Linha do Tempo de Despesas")
 
-            # Radar (opcional)
+            # Radar
             st.markdown("---")
             with st.expander("Gráfico Radar (opcional)"):
                 if len(cols_num) >= 1 and cols_txt:
                     dim_col = st.selectbox("Dimensão (texto) para o Radar:", cols_txt, key="radar_dim")
-                    val_cols = st.multiselect("Métricas numéricas para o Radar (2-6):", cols_num, default=cols_num[: min(3, len(cols_num))])
-                    top_n = st.slider("Top N categorias por soma da 1ª métrica:", min_value=3, max_value=20, value=6, step=1)
+                    val_cols = st.multiselect("Métricas numéricas para o Radar (2-6):", cols_num,
+                                              default=cols_num[: min(3, len(cols_num))])
+                    top_n = st.slider("Top N categorias por soma da 1ª métrica:",
+                                      min_value=3, max_value=20, value=6, step=1)
 
                     if len(val_cols) >= 1:
                         base = (
                             df_calculo.groupby(dim_col)[val_cols]
-                            .sum()
-                            .sort_values(val_cols[0], ascending=False)
-                            .head(top_n)
-                            .reset_index()
+                            .sum().sort_values(val_cols[0], ascending=False).head(top_n).reset_index()
                         )
-                        # Normaliza por coluna para comparar escalas diferentes
                         base_norm = base.copy()
                         for c in val_cols:
                             maxv = base_norm[c].max() or 1
@@ -249,14 +299,17 @@ if uploaded_file:
                         )
                         st.plotly_chart(fig_radar, use_container_width=True)
                         export_figs.append(fig_radar)
+                        # Para PDF
+                        pdf_ctx["radar"] = (base_norm, dim_col, val_cols, f"Radar normalizado por {dim_col}")
                 else:
                     st.info("Carregue dados com ao menos 1 coluna numérica e 1 categórica para ver o Radar.")
         else:
             st.warning("Não foi possível identificar colunas numéricas e categóricas para o dashboard.")
 
-        # Guardar no estado para downloads
+        # Guardar no estado
         st.session_state["export_figs"] = export_figs
         st.session_state["dashboard_ready"] = bool(export_figs)
+        st.session_state["pdf_ctx"] = pdf_ctx
 
     # -------- Dados Limpos --------
     with tab_dados:
@@ -275,52 +328,34 @@ if uploaded_file:
             else:
                 try:
                     genai.configure(api_key=gemini_key)
-
-                    # Descobrir modelos disponíveis e escolher automaticamente
                     modelos = list(genai.list_models())
                     modelos_validos = [
                         m.name for m in modelos
                         if hasattr(m, "supported_generation_methods")
                         and "generateContent" in m.supported_generation_methods
                     ]
-
-                    prefer = [
-                        "models/gemini-1.5-flash",
-                        "models/gemini-1.5-pro",
-                        "models/gemini-pro",
-                    ]
-                    modelo_escolhido = None
-                    for pref in prefer:
-                        if pref in modelos_validos:
-                            modelo_escolhido = pref
-                            break
-                    if not modelo_escolhido and modelos_validos:
-                        modelo_escolhido = modelos_validos[0]
-
+                    prefer = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-pro"]
+                    modelo_escolhido = next((p for p in prefer if p in modelos_validos), (modelos_validos[0] if modelos_validos else None))
                     if not modelo_escolhido:
-                        st.error("Nenhum modelo compatível encontrado para sua chave. Verifique permissões no Google AI Studio.")
+                        st.error("Nenhum modelo compatível encontrado para sua chave.")
                     else:
                         st.caption(f"Modelo em uso: {modelo_escolhido}")
                         model = genai.GenerativeModel(modelo_escolhido)
-
                         resumo = df_calculo.describe(include="all").astype(str).to_string()
                         amostra = df_display.head(15).to_string()
-
                         prompt = (
                             "Você é um auditor de despesas públicas. Responda de forma técnica e objetiva.\n\n"
                             f"PERGUNTA: {pergunta}\n\n"
                             f"RESUMO ESTATÍSTICO:\n{resumo}\n\n"
                             f"AMOSTRA (15 linhas):\n{amostra}\n"
                         )
-
                         with st.spinner("IA analisando..."):
                             resp = model.generate_content(prompt)
                             st.markdown("### Resposta da IA")
                             st.write(resp.text)
-
                 except Exception as e:
                     st.error(f"Erro na conexão com a IA: {e}")
-                    st.info("Atualize a lib: pip install -U google-generativeai. Verifique permissões do modelo no AI Studio.")
+                    st.info("Verifique permissões da chave no Google AI Studio.")
 
     # -------- Downloads --------
     with tab_down:
@@ -341,9 +376,9 @@ if uploaded_file:
                 mime="text/csv",
             )
 
-        # Dashboard HTML e Relatório PDF (quando houver figuras)
         dashboard_ready = st.session_state.get("dashboard_ready", False)
         export_figs = st.session_state.get("export_figs", [])
+        pdf_ctx = st.session_state.get("pdf_ctx", {})
 
         html_bytes = None
         pdf_bytes = b""
@@ -352,20 +387,31 @@ if uploaded_file:
             st.markdown("---")
             st.markdown("### Dashboard e Relatório")
 
-            # HTML interativo do dashboard
+            # HTML interativo com Plotly
             html_bytes = build_dashboard_html(export_figs, title="Dashboard de Despesas")
 
-            # PNGs das figuras para PDF: tentamos; se não der (nuvem), seguimos sem gráficos no PDF
+            # NOVO: gerar PNGs com Matplotlib para PDF (sem Chrome/Kaleido)
             figuras_png = []
-            try:
-                for f in export_figs:
-                    png = pio.to_image(f, format="png", width=1200, height=700)  # se não houver backend, cai no except
-                    figuras_png.append(png)
-            except Exception as e:
-                st.warning(f"Não foi possível incluir gráficos no PDF neste ambiente: {e}")
-                st.info("O PDF será gerado apenas com o resumo textual.")
+            # Bar
+            if "bar" in pdf_ctx:
+                df_g, cx, cy, ttl = pdf_ctx["bar"]
+                figuras_png.append(make_bar_png(df_g, cx, cy, ttl))
+            # Pie
+            if "pie" in pdf_ctx:
+                df_g, cx, cy, ttl = pdf_ctx["pie"]
+                figuras_png.append(make_pie_png(df_g, cx, cy, ttl))
+            # Line
+            if "line" in pdf_ctx:
+                df_t, dc, cy, ttl = pdf_ctx["line"]
+                if not df_t.empty:
+                    figuras_png.append(make_line_png(df_t, dc, cy, ttl))
+            # Radar
+            if "radar" in pdf_ctx:
+                base_norm, dim_col, metrics, ttl = pdf_ctx["radar"]
+                if len(metrics) >= 1 and not base_norm.empty:
+                    figuras_png.append(make_radar_png(base_norm, dim_col, metrics, ttl))
 
-            # Resumo simples para o PDF
+            # Resumo
             num_cols_list = df_calculo.select_dtypes(include=['number']).columns.tolist()
             cat_cols_list = [c for c in df_calculo.columns if c not in num_cols_list]
             resumo_linhas = [
@@ -375,7 +421,6 @@ if uploaded_file:
             ]
             resumo_texto = "\n".join(resumo_linhas)
 
-            # Gera PDF (com ou sem imagens)
             pdf_bytes = build_pdf_report(
                 titulo="Relatório de Despesas",
                 resumo_texto=resumo_texto,
@@ -401,7 +446,7 @@ if uploaded_file:
                         mime="application/pdf",
                     )
 
-            # ZIP opcional com tudo
+            # ZIP com tudo
             st.markdown("---")
             if pdf_bytes and html_bytes:
                 zip_buf = io.BytesIO()
