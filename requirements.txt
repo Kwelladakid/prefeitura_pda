@@ -1,10 +1,10 @@
 streamlit
 pandas
 plotly
-kaleido
+kaleido==0.2.1
+plotly-get-chrome
 google-generativeai
 xlsxwriter
 reportlab
-google-cloud-storage
 openpyxl>=3.1.2
 xlrd>=2.0.1
