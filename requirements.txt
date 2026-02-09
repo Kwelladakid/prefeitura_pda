@@ -1,0 +1,8 @@
+streamlit
+pandas
+plotly
+kaleido
+google-generativeai
+xlsxwriter
+reportlab
+google-cloud-storage
