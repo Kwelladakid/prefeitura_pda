@@ -6,3 +6,5 @@ xlsxwriter
 reportlab
 openpyxl>=3.1.2
 xlrd>=2.0.1
+matplotlib
+seaborn
