@@ -4,6 +4,7 @@ import os
 import io
 import json
 import zipfile
+import subprocess
 from datetime import datetime
 
 import streamlit as st
@@ -16,7 +17,28 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 
-from google.cloud import storage  # Publicação no GCS
+
+# =========================
+# Suporte a Kaleido + Chrome (Streamlit Cloud)
+# =========================
+def ensure_chrome_for_kaleido() -> bool:
+    """
+    Garante que o Kaleido consiga renderizar PNGs dos gráficos.
+    Tenta instalar/descobrir o caminho do Google Chrome via 'plotly_get_chrome'.
+    Requer 'plotly-get-chrome' no requirements.
+    """
+    try:
+        path = subprocess.check_output(
+            ["plotly_get_chrome", "--install", "--path-only"],
+            text=True
+        ).strip()
+        if path:
+            os.environ["PLOTLY_CHROME"] = path  # usado pelo Kaleido/Plotly
+            return True
+    except Exception as e:
+        # Não quebra o app; apenas indica que PDF pode sair sem gráficos
+        st.warning(f"Chrome não disponível para Kaleido: {e}")
+    return False
 
 
 # =========================
@@ -73,90 +95,14 @@ def build_pdf_report(titulo, resumo_texto, figuras_png_bytes, author="Analista I
 
 
 # =========================
-# NOVO: Página completa (índice) com dashboard embutido + botões de download
-# =========================
-def build_full_index_html(title, dashboard_figs, download_links):
-    # dashboard_figs: lista de figuras Plotly
-    # download_links: {'excel','csv','pdf','dashboard_html'} -> URLs públicas
-    parts = []
-    for i, f in enumerate(dashboard_figs):
-        parts.append(f.to_html(full_html=False, include_plotlyjs=("cdn" if i == 0 else False)))
-    html = f"""<!doctype html><html lang="pt-br"><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>{title}</title>
-<style>
- body{{font-family:Arial,Helvetica,sans-serif;margin:24px;}}
- .box{{border:1px solid #e5e5e5;padding:16px;margin:16px 0;border-radius:8px;}}
- .btn{{display:inline-block;margin:6px 8px 0 0;padding:10px 14px;background:#155DE9;color:#fff;text-decoration:none;border-radius:6px}}
- .btn:visited{{color:#fff}}
- h1{{margin:0 0 12px 0}}
- small{{color:#666}}
-</style>
-</head><body>
-<h1>{title}</h1>
-<small>Gerado automaticamente</small>
-
-<div class="box">
-  <h2>Downloads</h2>
-  <a class="btn" href="{download_links.get('excel','#')}" target="_blank" rel="noopener">Excel (dados limpos)</a>
-  <a class="btn" href="{download_links.get('csv','#')}" target="_blank" rel="noopener">CSV (dados limpos)</a>
-  <a class="btn" href="{download_links.get('pdf','#')}" target="_blank" rel="noopener">Relatório (PDF)</a>
-  <a class="btn" href="{download_links.get('dashboard_html','#')}" target="_blank" rel="noopener">Dashboard (HTML)</a>
-</div>
-
-<div class="box">
-  <h2>Dashboard Interativo</h2>
-  {''.join(parts)}
-</div>
-
-</body></html>"""
-    return html.encode("utf-8")
-
-
-# =========================
-# NOVO: Publicação no Google Cloud Storage
-# =========================
-def publish_to_gcs(creds_json_bytes, bucket_name, object_prefix, files_to_upload):
-    """
-    creds_json_bytes: conteúdo do JSON da Service Account (bytes)
-    bucket_name: nome do bucket GCS
-    object_prefix: pasta no bucket, ex: 'publicacoes/2026-02-09'
-    files_to_upload: {'nome_arquivo': bytes}
-    Retorna: {'nome_arquivo': public_url}
-    """
-    creds_info = json.loads(creds_json_bytes.decode("utf-8"))
-    client = storage.Client.from_service_account_info(creds_info)
-    bucket = client.bucket(bucket_name)
-
-    urls = {}
-    for filename, content in files_to_upload.items():
-        path = f"{object_prefix.strip('/')}/{filename}" if object_prefix else filename
-        blob = bucket.blob(path)
-        # Content-Type
-        if filename.endswith(".html"):
-            blob.content_type = "text/html"
-        elif filename.endswith(".csv"):
-            blob.content_type = "text/csv"
-        elif filename.endswith(".xlsx"):
-            blob.content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        elif filename.endswith(".pdf"):
-            blob.content_type = "application/pdf"
-        else:
-            blob.content_type = "application/octet-stream"
-
-        blob.cache_control = "no-cache"
-        blob.upload_from_string(content)
-        blob.make_public()  # deixa público
-        urls[filename] = blob.public_url  # https://storage.googleapis.com/<bucket>/<path>
-    return urls
-
-
-# =========================
 # Configuração da página
 # =========================
 st.set_page_config(page_title="Analista de Despesas - Prefeitura", layout="wide")
-st.title("🏛️ Analista de Despesas (Limpeza, Dashboard, IA e Publicação)")
+st.title("🏛️ Analista de Despesas (Limpeza, Dashboard, IA)")
 st.markdown("---")
+
+# Garante Chrome p/ Kaleido (não quebra se falhar)
+ensure_chrome_for_kaleido()
 
 # =========================
 # Barra lateral
@@ -165,25 +111,24 @@ st.sidebar.header("⚙️ Configurações")
 gemini_key = st.sidebar.text_input("Gemini API Key", type="password", value=os.getenv("GEMINI_API_KEY", ""))
 st.sidebar.caption("Dica: exporte GEMINI_API_KEY no seu ~/.zshrc para preencher automaticamente.")
 
-# NOVO: Configurações de Publicação (GCS)
-st.sidebar.subheader("🌐 Publicação (Google Cloud Storage)")
-bucket_name = st.sidebar.text_input("Bucket GCS (ex: prefeitura-despesas-site)")
-prefix = st.sidebar.text_input("Pasta no bucket (ex: publicacoes/2026-02-09)", value="publicacoes")
-creds_uploader = st.sidebar.file_uploader("Service Account JSON (GCS)", type=["json"], accept_multiple_files=False)
-
 # =========================
 # Upload de arquivo
 # =========================
 st.subheader("📂 Carregar Planilha")
-uploaded_file = st.file_uploader("Arraste seu arquivo Excel ou CSV aqui", type=["xlsx", "csv"])
+uploaded_file = st.file_uploader("Arraste seu arquivo CSV/XLSX/XLS aqui", type=["csv", "xlsx", "xls"])
 
 if uploaded_file:
-    # Leitura do arquivo
+    # Leitura do arquivo (motores explícitos)
     try:
-        if uploaded_file.name.endswith(".csv"):
+        name = uploaded_file.name.lower()
+        if name.endswith(".csv"):
             df_raw = pd.read_csv(uploaded_file)
+        elif name.endswith(".xlsx"):
+            df_raw = pd.read_excel(uploaded_file, engine="openpyxl")
+        elif name.endswith(".xls"):
+            df_raw = pd.read_excel(uploaded_file, engine="xlrd")
         else:
-            df_raw = pd.read_excel(uploaded_file)
+            raise ValueError("Formato não suportado. Envie CSV, XLSX ou XLS.")
     except Exception as e:
         st.error(f"Erro ao ler o arquivo: {e}")
         st.stop()
@@ -235,7 +180,7 @@ if uploaded_file:
     # Interface em abas
     # =========================
     tab_dash, tab_dados, tab_ia, tab_down = st.tabs(
-        ["📊 Dashboard", "📋 Dados Limpos", "🤖 IA (Gemini)", "⬇️ Downloads / 🌐 Publicação"]
+        ["📊 Dashboard", "📋 Dados Limpos", "🤖 IA (Gemini)", "⬇️ Downloads"]
     )
 
     # -------- Dashboard --------
@@ -290,7 +235,7 @@ if uploaded_file:
         else:
             st.warning("Não foi possível identificar colunas numéricas e categóricas para o dashboard.")
 
-        # Guardar no estado para downloads/publicação
+        # Guardar no estado para downloads
         st.session_state["export_figs"] = export_figs
         st.session_state["dashboard_ready"] = bool(export_figs)
 
@@ -358,7 +303,7 @@ if uploaded_file:
                     st.error(f"Erro na conexão com a IA: {e}")
                     st.info("Atualize a lib: pip install -U google-generativeai. Verifique permissões do modelo no AI Studio.")
 
-    # -------- Downloads / Publicação --------
+    # -------- Downloads --------
     with tab_down:
         st.subheader("Exportações")
         colA, colB = st.columns(2)
@@ -391,15 +336,15 @@ if uploaded_file:
             # HTML interativo do dashboard
             html_bytes = build_dashboard_html(export_figs, title="Dashboard de Despesas")
 
-            # PNGs das figuras para PDF (via kaleido)
+            # PNGs das figuras para PDF (via kaleido) com fallback se não houver Chrome
             figuras_png = []
             try:
                 for f in export_figs:
                     png = pio.to_image(f, format="png", width=1200, height=700, engine="kaleido")
                     figuras_png.append(png)
             except Exception as e:
-                st.error(f"Falha ao renderizar imagens para PDF (kaleido): {e}")
-                st.info("Instale o kaleido: pip install kaleido")
+                st.warning(f"Falha ao renderizar imagens para PDF (Kaleido/Chrome): {e}")
+                st.info("O PDF será gerado sem gráficos. Para habilitar gráficos, adicione 'plotly-get-chrome' no requirements e reimplante.")
 
             # Resumo simples para o PDF
             resumo_linhas = [
@@ -409,13 +354,13 @@ if uploaded_file:
             ]
             resumo_texto = "\n".join(resumo_linhas)
 
-            if figuras_png:
-                pdf_bytes = build_pdf_report(
-                    titulo="Relatório de Despesas",
-                    resumo_texto=resumo_texto,
-                    figuras_png_bytes=figuras_png,
-                    author="Sistema IA"
-                )
+            # Gera PDF (com ou sem imagens)
+            pdf_bytes = build_pdf_report(
+                titulo="Relatório de Despesas",
+                resumo_texto=resumo_texto,
+                figuras_png_bytes=figuras_png,
+                author="Sistema IA"
+            )
 
             c1, c2 = st.columns(2)
             with c1:
@@ -434,8 +379,6 @@ if uploaded_file:
                         file_name="relatorio_despesas.pdf",
                         mime="application/pdf",
                     )
-                else:
-                    st.warning("Gere o PDF após instalar o kaleido (pip install kaleido).")
 
             # ZIP opcional com tudo
             st.markdown("---")
@@ -455,65 +398,5 @@ if uploaded_file:
                 )
         else:
             st.info("Gere o dashboard na aba '📊 Dashboard' para habilitar os downloads de HTML/PDF.")
-
-        # ============= Publicação no Google (GCS) =============
-        st.markdown("---")
-        st.subheader("🌐 Publicar página completa (GCS)")
-        st.caption("Requer: bucket GCS, Service Account com Storage Admin e arquivo JSON na barra lateral.")
-
-        if st.button("Publicar no Google (GCS)"):
-            if not bucket_name:
-                st.error("Informe o nome do bucket na barra lateral.")
-            elif not creds_uploader:
-                st.error("Envie o JSON da Service Account na barra lateral.")
-            elif not st.session_state.get("dashboard_ready", False) or not export_figs:
-                st.error("Gere o dashboard na aba '📊 Dashboard' antes de publicar.")
-            else:
-                try:
-                    creds_bytes = creds_uploader.getvalue()
-
-                    # 1) Sobe artefatos (Excel/CSV/HTML/PDF) para o GCS
-                    files_stage1 = {
-                        "despesas_processadas.xlsx": excel_bytes,
-                        "despesas_processadas.csv": csv_bytes,
-                    }
-                    if html_bytes:
-                        files_stage1["dashboard_despesas.html"] = html_bytes
-                    if pdf_bytes:
-                        files_stage1["relatorio_despesas.pdf"] = pdf_bytes
-
-                    uploaded_urls = publish_to_gcs(
-                        creds_json_bytes=creds_bytes,
-                        bucket_name=bucket_name,
-                        object_prefix=prefix,
-                        files_to_upload=files_stage1
-                    )
-
-                    # 2) Monta a página índice apontando para URLs públicas
-                    download_links = {
-                        "excel": uploaded_urls.get("despesas_processadas.xlsx"),
-                        "csv": uploaded_urls.get("despesas_processadas.csv"),
-                        "pdf": uploaded_urls.get("relatorio_despesas.pdf"),
-                        "dashboard_html": uploaded_urls.get("dashboard_despesas.html"),
-                    }
-                    title = "Portal de Despesas - Publicação Automática"
-                    export_figs = st.session_state.get("export_figs", [])
-                    full_index_bytes = build_full_index_html(title, export_figs, download_links)
-
-                    # 3) Publica o index.html
-                    uploaded_index = publish_to_gcs(
-                        creds_json_bytes=creds_bytes,
-                        bucket_name=bucket_name,
-                        object_prefix=prefix,
-                        files_to_upload={"index.html": full_index_bytes}
-                    )
-                    index_url = uploaded_index["index.html"]
-
-                    st.success("Publicação concluída!")
-                    st.write("URL pública do índice:")
-                    st.write(index_url)
-                    st.info("Dica: em 'Website configuration' do bucket, defina 'Main page: index.html' para usar o endpoint de site estático.")
-                except Exception as e:
-                    st.error(f"Falha na publicação: {e}")
 else:
     st.info("💡 Faça upload de um arquivo para iniciar.")
