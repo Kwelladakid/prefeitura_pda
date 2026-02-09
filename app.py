@@ -4,41 +4,18 @@ import os
 import io
 import json
 import zipfile
-import subprocess
 from datetime import datetime
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import plotly.io as pio
 import google.generativeai as genai
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
-
-
-# =========================
-# Suporte a Kaleido + Chrome (Streamlit Cloud)
-# =========================
-def ensure_chrome_for_kaleido() -> bool:
-    """
-    Garante que o Kaleido consiga renderizar PNGs dos gráficos.
-    Tenta instalar/descobrir o caminho do Google Chrome via 'plotly_get_chrome'.
-    Requer 'plotly-get-chrome' no requirements.
-    """
-    try:
-        path = subprocess.check_output(
-            ["plotly_get_chrome", "--install", "--path-only"],
-            text=True
-        ).strip()
-        if path:
-            os.environ["PLOTLY_CHROME"] = path  # usado pelo Kaleido/Plotly
-            return True
-    except Exception as e:
-        # Não quebra o app; apenas indica que PDF pode sair sem gráficos
-        st.warning(f"Chrome não disponível para Kaleido: {e}")
-    return False
 
 
 # =========================
@@ -100,9 +77,6 @@ def build_pdf_report(titulo, resumo_texto, figuras_png_bytes, author="Analista I
 st.set_page_config(page_title="Analista de Despesas - Prefeitura", layout="wide")
 st.title("🏛️ Analista de Despesas (Limpeza, Dashboard, IA)")
 st.markdown("---")
-
-# Garante Chrome p/ Kaleido (não quebra se falhar)
-ensure_chrome_for_kaleido()
 
 # =========================
 # Barra lateral
@@ -166,7 +140,7 @@ if uploaded_file:
     # DataFrame para exibição segura (evita ArrowTypeError)
     df_display = df_calculo.copy()
     for col in df_display.columns:
-        if (not pd.api.types.is_numeric_dtype(df_display[col])) and (not pd.api.types.is_datetime64_any_dtype(df_display[col])):
+        if (not pd.api.types.is_numeric_dtype(df_display[col])) and (not pd.api.types.is_datetime64_any_dtype[df_display[col]]):
             df_display[col] = df_display[col].astype(str).replace("nan", "")
 
     # Bytes para planilhas (Excel/CSV)
@@ -219,6 +193,7 @@ if uploaded_file:
                 st.plotly_chart(fig_pie, use_container_width=True)
                 export_figs.append(fig_pie)
 
+            # Linha do tempo (se houver data)
             if cols_date:
                 st.markdown("---")
                 st.markdown("**Evolução dos Gastos no Tempo**")
@@ -232,6 +207,49 @@ if uploaded_file:
                     )
                     st.plotly_chart(fig_line, use_container_width=True)
                     export_figs.append(fig_line)
+
+            # Radar (opcional)
+            st.markdown("---")
+            with st.expander("Gráfico Radar (opcional)"):
+                if len(cols_num) >= 1 and cols_txt:
+                    dim_col = st.selectbox("Dimensão (texto) para o Radar:", cols_txt, key="radar_dim")
+                    val_cols = st.multiselect("Métricas numéricas para o Radar (2-6):", cols_num, default=cols_num[: min(3, len(cols_num))])
+                    top_n = st.slider("Top N categorias por soma da 1ª métrica:", min_value=3, max_value=20, value=6, step=1)
+
+                    if len(val_cols) >= 1:
+                        base = (
+                            df_calculo.groupby(dim_col)[val_cols]
+                            .sum()
+                            .sort_values(val_cols[0], ascending=False)
+                            .head(top_n)
+                            .reset_index()
+                        )
+                        # Normaliza por coluna para comparar escalas diferentes
+                        base_norm = base.copy()
+                        for c in val_cols:
+                            maxv = base_norm[c].max() or 1
+                            base_norm[c] = base_norm[c] / maxv
+
+                        fig_radar = go.Figure()
+                        categorias = val_cols
+                        for _, row in base_norm.iterrows():
+                            fig_radar.add_trace(go.Scatterpolar(
+                                r=[row[c] for c in categorias] + [row[categorias[0]]],
+                                theta=categorias + [categorias[0]],
+                                fill='toself',
+                                name=str(row[dim_col])
+                            ))
+                        fig_radar.update_layout(
+                            polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+                            showlegend=True,
+                            title=f"Radar normalizado de métricas por {dim_col}",
+                            template="plotly_white",
+                            margin=dict(l=20, r=20, t=60, b=20)
+                        )
+                        st.plotly_chart(fig_radar, use_container_width=True)
+                        export_figs.append(fig_radar)
+                else:
+                    st.info("Carregue dados com ao menos 1 coluna numérica e 1 categórica para ver o Radar.")
         else:
             st.warning("Não foi possível identificar colunas numéricas e categóricas para o dashboard.")
 
@@ -336,21 +354,23 @@ if uploaded_file:
             # HTML interativo do dashboard
             html_bytes = build_dashboard_html(export_figs, title="Dashboard de Despesas")
 
-            # PNGs das figuras para PDF (via kaleido) com fallback se não houver Chrome
+            # PNGs das figuras para PDF: tentamos; se não der (nuvem), seguimos sem gráficos no PDF
             figuras_png = []
             try:
                 for f in export_figs:
-                    png = pio.to_image(f, format="png", width=1200, height=700, engine="kaleido")
+                    png = pio.to_image(f, format="png", width=1200, height=700)  # requer backend de imagem
                     figuras_png.append(png)
             except Exception as e:
-                st.warning(f"Falha ao renderizar imagens para PDF (Kaleido/Chrome): {e}")
-                st.info("O PDF será gerado sem gráficos. Para habilitar gráficos, adicione 'plotly-get-chrome' no requirements e reimplante.")
+                st.warning(f"Não foi possível incluir gráficos no PDF neste ambiente: {e}")
+                st.info("O PDF será gerado apenas com o resumo textual.")
 
             # Resumo simples para o PDF
+            num_cols_list = df_calculo.select_dtypes(include=['number']).columns.tolist()
+            cat_cols_list = [c for c in df_calculo.columns if c not in num_cols_list]
             resumo_linhas = [
                 f"Total de registros: {len(df_clean)}",
-                f"Colunas numéricas: {', '.join(df_calculo.select_dtypes(include=['number']).columns) or 'nenhuma'}",
-                f"Colunas categóricas: {', '.join([c for c in df_calculo.columns if c not in df_calculo.select_dtypes(include=['number']).columns]) or 'nenhuma'}",
+                f"Colunas numéricas: {', '.join(num_cols_list) or 'nenhuma'}",
+                f"Colunas não numéricas: {', '.join(cat_cols_list) or 'nenhuma'}",
             ]
             resumo_texto = "\n".join(resumo_linhas)
 
